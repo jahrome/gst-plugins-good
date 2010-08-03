@@ -22,10 +22,20 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
+#ifdef BUILD_WITH_ANDROID
+/* Android doesn't support il8n, remove it */
+#define  _(x) (x)
 #include "gst/gst-i18n-plugin.h"
+#endif /* BUILD_WITH_ANDROID */
 
 #include "qtdemux.h"
+#ifndef BUILD_WITH_ANDROID
+/* TODO:
+ * gstrtpqtdepay is removed in Android platform to save porting
+ * effort. It shall be supported in future version */
 #include "gstrtpxqtdepay.h"
+#endif /* BUILD_WITH_ANDROID */
 
 static gboolean
 plugin_init (GstPlugin * plugin)
@@ -49,9 +59,14 @@ plugin_init (GstPlugin * plugin)
           GST_RANK_PRIMARY, GST_TYPE_QTDEMUX))
     return FALSE;
 
+#ifndef BUILD_WITH_ANDROID
+  /* TODO:
+   * gstrtpqtdepay is removed in Android platform to save porting
+   * effort. It shall be supported in future version */
   if (!gst_element_register (plugin, "rtpxqtdepay",
           GST_RANK_MARGINAL, GST_TYPE_RTP_XQT_DEPAY))
     return FALSE;
+#endif /* BUILD_WITH_ANDROID */
 
   return TRUE;
 }
