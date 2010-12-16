@@ -70,7 +70,7 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-
+#include "glib/glibconfig.h"
 #include <string.h>
 #ifdef HAVE_STDLIB_H
 #include <stdlib.h>             /* atoi() */

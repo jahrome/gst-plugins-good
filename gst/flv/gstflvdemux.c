@@ -310,7 +310,7 @@ gst_flv_demux_parse_metadata_item (GstFlvDemux * demux, GstByteReader * reader,
       if (!strcmp (tag_name, "creationdate")) {
         GDate *date = g_date_new ();
 
-        parse_flv_demux_parse_date_string (date, s);
+        //parse_flv_demux_parse_date_string (date, s);
         if (!g_date_valid (date)) {
           GST_DEBUG_OBJECT (demux, "Failed to parse string as date");
         } else {
