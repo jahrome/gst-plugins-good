@@ -3,23 +3,20 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES:= 	\
-	quicktime.c 	\
-	qtdemux.c 	\
-	qtdemux_types.c \
-	qtdemux_lang.c	\
-	qtdemux_dump.c
+	gstsouphttpsrc.c
 
 LOCAL_SHARED_LIBRARIES :=	\
 	libgsttag-0.10		\
-	libgstriff-0.10		\
 	libgstreamer-0.10	\
 	libgstbase-0.10		\
 	libglib-2.0		\
 	libgthread-2.0		\
 	libgmodule-2.0		\
-	libgobject-2.0
+	libgobject-2.0		\
+	libgstpbutils-0.10	\
+	libz
 
-LOCAL_MODULE:= libgstqtdemux
+LOCAL_MODULE:= libgstsouphttp
 
 LOCAL_C_INCLUDES := 				\
 	$(LOCAL_PATH)				\
@@ -35,6 +32,7 @@ LOCAL_C_INCLUDES := 				\
 	external/glib/glib		 	\
 	external/glib/gmodule	  		\
 	external/glib/gobject	  		\
+	external/libsoup/	  		\
 	external/glib/gthread
 
 LOCAL_CFLAGS := \

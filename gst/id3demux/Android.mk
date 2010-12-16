@@ -15,6 +15,7 @@ LOCAL_SHARED_LIBRARIES :=	\
 	libgthread-2.0		\
 	libgmodule-2.0		\
 	libgobject-2.0		\
+	libgstpbutils-0.10	\
 	libz
 
 LOCAL_MODULE:= libgstid3demux
