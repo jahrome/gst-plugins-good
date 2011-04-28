@@ -44,6 +44,7 @@ GST_PLUGINS_GOOD_BUILT_SOURCES = \
 	gst/wavenc/Android.mk		\
 	gst/monoscope/Android.mk		\
 	gst/y4m/Android.mk		\
+	ext/speex/Android.mk		\
 	gst/wavparse/Android.mk
 
 GST_PLUGINS_GOOD_BUILT_SOURCES := $(patsubst %, $(abspath $(GST_PLUGINS_GOOD_TOP))/%, $(GST_PLUGINS_GOOD_BUILT_SOURCES))
@@ -111,3 +112,4 @@ CONFIGURE_TARGETS += gst-plugins-good-configure
 -include $(GST_PLUGINS_GOOD_TOP)/gst/wavparse/Android.mk
 -include $(GST_PLUGINS_GOOD_TOP)/gst/y4m/Android.mk
 -include $(GST_PLUGINS_GOOD_TOP)/gst/monoscope/Android.mk
+-include $(GST_PLUGINS_GOOD_TOP)/ext/speex/Android.mk
