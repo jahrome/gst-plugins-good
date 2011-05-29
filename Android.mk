@@ -45,6 +45,7 @@ GST_PLUGINS_GOOD_BUILT_SOURCES = \
 	gst/monoscope/Android.mk		\
 	gst/y4m/Android.mk		\
 	ext/speex/Android.mk		\
+	ext/jpeg/Android.mk		\
 	gst/wavparse/Android.mk
 
 GST_PLUGINS_GOOD_BUILT_SOURCES := $(patsubst %, $(abspath $(GST_PLUGINS_GOOD_TOP))/%, $(GST_PLUGINS_GOOD_BUILT_SOURCES))
@@ -58,7 +59,7 @@ gst-plugins-good-configure-real:
 	LDFLAGS="$(CONFIGURE_LDFLAGS)" \
 	CPP=$(CONFIGURE_CPP) \
 	CPPFLAGS="$(CONFIGURE_CPPFLAGS)" \
-	PKG_CONFIG_LIBDIR="$(CONFIGURE_PKG_CONFIG_LIBDIR)" \
+	PKG_CONFIG_LIBDIR="$(_CONFIGURE_PKG_CONFIG_LIBDIR)" \
 	PKG_CONFIG_TOP_BUILD_DIR=/ \
 	$(abspath $(GST_PLUGINS_GOOD_TOP))/$(CONFIGURE) --host=arm-linux-androideabi \
 	--prefix=/system --disable-orc --disable-valgrind --disable-gtk-doc && \
@@ -113,3 +114,4 @@ CONFIGURE_TARGETS += gst-plugins-good-configure
 -include $(GST_PLUGINS_GOOD_TOP)/gst/y4m/Android.mk
 -include $(GST_PLUGINS_GOOD_TOP)/gst/monoscope/Android.mk
 -include $(GST_PLUGINS_GOOD_TOP)/ext/speex/Android.mk
+-include $(GST_PLUGINS_GOOD_TOP)/ext/jpeg/Android.mk
