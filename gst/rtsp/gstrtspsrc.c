@@ -528,6 +528,8 @@ gst_rtspsrc_init (GstRTSPSrc * src, GstRTSPSrcClass * g_class)
   g_static_rec_mutex_init (src->state_rec_lock);
 
   src->state = GST_RTSP_STATE_INVALID;
+
+  GST_OBJECT_FLAG_SET (src, GST_ELEMENT_IS_SOURCE);
 }
 
 static void
@@ -4483,10 +4485,13 @@ next:
       /* ok, a response is good */
       GST_DEBUG_OBJECT (src, "received response message");
       break;
-    default:
     case GST_RTSP_MESSAGE_DATA:
       /* get next response */
       GST_DEBUG_OBJECT (src, "ignoring data response message");
+      goto next;
+    default:
+      GST_WARNING_OBJECT (src, "ignoring unknown message type %d",
+          response->type);
       goto next;
   }
 
@@ -4995,7 +5000,7 @@ static GstRTSPResult
 gst_rtspsrc_setup_streams (GstRTSPSrc * src, gboolean async)
 {
   GList *walk;
-  GstRTSPResult res;
+  GstRTSPResult res = GST_RTSP_ERROR;
   GstRTSPMessage request = { 0 };
   GstRTSPMessage response = { 0 };
   GstRTSPStream *stream = NULL;
@@ -5026,6 +5031,9 @@ gst_rtspsrc_setup_streams (GstRTSPSrc * src, gboolean async)
   /* keep track of next port number, 0 is random */
   src->next_port_num = src->client_port_range.min;
   rtpport = rtcpport = 0;
+
+  if (G_UNLIKELY (src->streams == NULL))
+    goto no_streams;
 
   for (walk = src->streams; walk; walk = g_list_next (walk)) {
     GstRTSPConnection *conn;
@@ -5279,6 +5287,12 @@ no_protocols:
         ("Could not connect to server, no protocols left"));
     return GST_RTSP_ERROR;
   }
+no_streams:
+  {
+    GST_ELEMENT_ERROR (src, RESOURCE, SETTINGS, (NULL),
+        ("SDP contains no streams"));
+    return GST_RTSP_ERROR;
+  }
 create_request_failed:
   {
     gchar *str = gst_rtsp_strresult (res);
@@ -5488,7 +5502,6 @@ gst_rtspsrc_open_from_sdp (GstRTSPSrc * src, GstSDPMessage * sdp,
   }
 
   src->state = GST_RTSP_STATE_INIT;
-  GST_OBJECT_FLAG_SET (src, GST_ELEMENT_IS_SOURCE);
 
   /* setup streams */
   if ((res = gst_rtspsrc_setup_streams (src, async)) < 0)
@@ -6015,8 +6028,12 @@ gst_rtspsrc_play (GstRTSPSrc * src, GstSegment * segment, gboolean async)
    * udp sources */
   gst_rtspsrc_send_dummy_packets (src);
 
-  /* activate receive elements */
-  gst_element_set_state (GST_ELEMENT_CAST (src), GST_STATE_PLAYING);
+  /* activate receive elements;
+   * only in async case, since receive elements may not have been affected
+   * by overall state change (e.g. not around yet),
+   * do not mess with state in sync case (e.g. seeking) */
+  if (async)
+    gst_element_set_state (GST_ELEMENT_CAST (src), GST_STATE_PLAYING);
 
   /* construct a control url */
   if (src->control)
@@ -6454,6 +6471,8 @@ gst_rtspsrc_thread (GstRTSPSrc * src)
     else if (src->task)
       gst_task_pause (src->task);
   }
+  /* reset waiting */
+  src->waiting = FALSE;
   GST_OBJECT_UNLOCK (src);
 }
 

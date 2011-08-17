@@ -63,6 +63,7 @@ enum
   PROP_DEVICE_NAME,
   PROP_CLIENT,
   PROP_STREAM_PROPERTIES,
+  PROP_SOURCE_OUTPUT_INDEX,
   PROP_LAST
 };
 
@@ -211,6 +212,7 @@ gst_pulsesrc_class_init (GstPulseSrcClass * klass)
   GstAudioSrcClass *gstaudiosrc_class = GST_AUDIO_SRC_CLASS (klass);
   GstBaseSrcClass *gstbasesrc_class = GST_BASE_SRC_CLASS (klass);
   GstElementClass *gstelement_class = GST_ELEMENT_CLASS (klass);
+  gchar *clientname;
 
   gobject_class->finalize = gst_pulsesrc_finalize;
   gobject_class->set_property = gst_pulsesrc_set_property;
@@ -247,6 +249,7 @@ gst_pulsesrc_class_init (GstPulseSrcClass * klass)
           "Human-readable name of the sound device", DEFAULT_DEVICE_NAME,
           G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 
+  clientname = gst_pulse_client_name ();
   /**
    * GstPulseSink:client
    *
@@ -257,9 +260,10 @@ gst_pulsesrc_class_init (GstPulseSrcClass * klass)
   g_object_class_install_property (gobject_class,
       PROP_CLIENT,
       g_param_spec_string ("client", "Client",
-          "The PulseAudio client_name_to_use", gst_pulse_client_name (),
+          "The PulseAudio client_name_to_use", clientname,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
           GST_PARAM_MUTABLE_READY));
+  g_free (clientname);
 
   /**
    * GstPulseSrc:stream-properties
@@ -283,6 +287,20 @@ gst_pulsesrc_class_init (GstPulseSrcClass * klass)
       g_param_spec_boxed ("stream-properties", "stream properties",
           "list of pulseaudio stream properties",
           GST_TYPE_STRUCTURE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * GstPulseSrc:source-output-index
+   *
+   * The index of the PulseAudio source output corresponding to this element.
+   *
+   * Since: 0.10.31
+   */
+  g_object_class_install_property (gobject_class,
+      PROP_SOURCE_OUTPUT_INDEX,
+      g_param_spec_uint ("source-output-index", "source output index",
+          "The index of the PulseAudio source output corresponding to this "
+          "record stream", 0, G_MAXUINT, PA_INVALID_INDEX,
+          G_PARAM_READABLE | G_PARAM_STATIC_STRINGS));
 }
 
 static void
@@ -295,17 +313,12 @@ gst_pulsesrc_init (GstPulseSrc * pulsesrc, GstPulseSrcClass * klass)
 
   pulsesrc->context = NULL;
   pulsesrc->stream = NULL;
+  pulsesrc->source_output_idx = PA_INVALID_INDEX;
 
   pulsesrc->read_buffer = NULL;
   pulsesrc->read_buffer_length = 0;
 
-#ifdef HAVE_PULSE_0_9_13
   pa_sample_spec_init (&pulsesrc->sample_spec);
-#else
-  pulsesrc->sample_spec.format = PA_SAMPLE_INVALID;
-  pulsesrc->sample_spec.rate = 0;
-  pulsesrc->sample_spec.channels = 0;
-#endif
 
   pulsesrc->operation_success = FALSE;
   pulsesrc->paused = FALSE;
@@ -330,6 +343,8 @@ gst_pulsesrc_destroy_stream (GstPulseSrc * pulsesrc)
     pa_stream_disconnect (pulsesrc->stream);
     pa_stream_unref (pulsesrc->stream);
     pulsesrc->stream = NULL;
+    pulsesrc->source_output_idx = PA_INVALID_INDEX;
+    g_object_notify (G_OBJECT (pulsesrc), "source-output-index");
   }
 
   g_free (pulsesrc->device_description);
@@ -527,6 +542,9 @@ gst_pulsesrc_get_property (GObject * object,
     case PROP_STREAM_PROPERTIES:
       gst_value_set_structure (value, pulsesrc->properties);
       break;
+    case PROP_SOURCE_OUTPUT_INDEX:
+      g_value_set_uint (value, pulsesrc->source_output_idx);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -598,11 +616,7 @@ gst_pulsesrc_stream_latency_update_cb (pa_stream * s, void *userdata)
         "latency update (information unknown)");
     return;
   }
-#ifdef HAVE_PULSE_0_9_11
   source_usec = info->configured_source_usec;
-#else
-  source_usec = 0;
-#endif
 
   GST_LOG_OBJECT (GST_PULSESRC_CAST (userdata),
       "latency_update, %" G_GUINT64_FORMAT ", %d:%" G_GINT64_FORMAT ", %d:%"
@@ -1042,11 +1056,8 @@ gst_pulsesrc_prepare (GstAudioSrc * asrc, GstRingBufferSpec * spec)
   GST_INFO_OBJECT (pulsesrc, "fragsize:  %d", wanted.fragsize);
 
   if (pa_stream_connect_record (pulsesrc->stream, pulsesrc->device, &wanted,
-          PA_STREAM_INTERPOLATE_TIMING |
-          PA_STREAM_AUTO_TIMING_UPDATE | PA_STREAM_NOT_MONOTONOUS |
-#ifdef HAVE_PULSE_0_9_11
-          PA_STREAM_ADJUST_LATENCY |
-#endif
+          PA_STREAM_INTERPOLATE_TIMING | PA_STREAM_AUTO_TIMING_UPDATE |
+          PA_STREAM_NOT_MONOTONIC | PA_STREAM_ADJUST_LATENCY |
           PA_STREAM_START_CORKED) < 0) {
     GST_ELEMENT_ERROR (pulsesrc, RESOURCE, FAILED,
         ("Failed to connect stream: %s",
@@ -1074,6 +1085,10 @@ gst_pulsesrc_prepare (GstAudioSrc * asrc, GstRingBufferSpec * spec)
     /* Wait until the stream is ready */
     pa_threaded_mainloop_wait (pulsesrc->mainloop);
   }
+
+  /* store the source output index so it can be accessed via a property */
+  pulsesrc->source_output_idx = pa_stream_get_index (pulsesrc->stream);
+  g_object_notify (G_OBJECT (pulsesrc), "source-output-index");
 
   /* get the actual buffering properties now */
   actual = pa_stream_get_buffer_attr (pulsesrc->stream);

@@ -2723,6 +2723,7 @@ gst_qtdemux_loop_state_header (GstQTDemux * qtdemux)
             ("We got less than expected (received %u, wanted %u, offset %"
                 G_GUINT64_FORMAT ")",
                 GST_BUFFER_SIZE (moov), (guint) length, cur_offset));
+        gst_buffer_unref (moov);
         ret = GST_FLOW_ERROR;
         goto beach;
       }
@@ -7457,7 +7458,7 @@ gst_qtdemux_guess_bitrate (GstQTDemux * qtdemux)
   /* Subtract the header size */
   GST_DEBUG_OBJECT (qtdemux, "Total size %" G_GINT64_FORMAT ", header size %u",
       size, qtdemux->header_size);
-  g_assert (size > qtdemux->header_size);
+  g_assert (size >= qtdemux->header_size);
   size = size - qtdemux->header_size;
 
   if (!gst_qtdemux_get_duration (qtdemux, &duration) ||
@@ -7471,6 +7472,7 @@ gst_qtdemux_guess_bitrate (GstQTDemux * qtdemux)
       case FOURCC_soun:
       case FOURCC_vide:
         /* retrieve bitrate, prefer avg then max */
+        bitrate = 0;
         if (qtdemux->streams[i]->pending_tags) {
           gst_tag_list_get_uint (qtdemux->streams[i]->pending_tags,
               GST_TAG_MAXIMUM_BITRATE, &bitrate);

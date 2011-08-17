@@ -613,6 +613,8 @@ gst_qt_mux_add_mp4_date (GstQTMux * qtmux, const GstTagList * list,
   month = g_date_get_month (date);
   day = g_date_get_day (date);
 
+  g_date_free (date);
+
   if (year == G_DATE_BAD_YEAR && month == G_DATE_BAD_MONTH &&
       day == G_DATE_BAD_DAY) {
     GST_WARNING_OBJECT (qtmux, "invalid date in tag");
@@ -991,6 +993,7 @@ static const GstTagToFourcc tag_matches_mp4[] = {
   {FOURCC_disk, GST_TAG_ALBUM_VOLUME_NUMBER, GST_TAG_ALBUM_VOLUME_COUNT,
       gst_qt_mux_add_mp4_tag},
   {FOURCC_covr, GST_TAG_PREVIEW_IMAGE, NULL, gst_qt_mux_add_mp4_cover},
+  {FOURCC_covr, GST_TAG_IMAGE, NULL, gst_qt_mux_add_mp4_cover},
   {0, NULL,}
 };
 
@@ -3117,6 +3120,9 @@ gst_qt_mux_video_sink_set_caps (GstPad * pad, GstCaps * caps)
   } else if (strcmp (mimetype, "video/x-vp8") == 0) {
     entry.fourcc = FOURCC_VP80;
     sync = FALSE;
+  } else if (strcmp (mimetype, "video/x-dirac") == 0) {
+    entry.fourcc = FOURCC_drac;
+    qtpad->have_dts = TRUE;
   } else if (strcmp (mimetype, "video/x-qt-part") == 0) {
     guint32 fourcc;
 

@@ -5,7 +5,7 @@ dnl please read gstreamer/docs/random/autotools before changing this file
 dnl initialize autoconf
 dnl releases only do -Wall, git and prerelease does -Werror too
 dnl use a three digit version number for releases, and four for git/pre
-AC_INIT(GStreamer Good Plug-ins, 0.10.29.1,
+AC_INIT(GStreamer Good Plug-ins, 0.10.30.1,
     http://bugzilla.gnome.org/enter_bug.cgi?product=GStreamer,
     gst-plugins-good)
 
@@ -54,8 +54,8 @@ AC_LIBTOOL_WIN32_DLL
 AM_PROG_LIBTOOL
 
 dnl *** required versions of GStreamer stuff ***
-GST_REQ=0.10.33
-GSTPB_REQ=0.10.33
+GST_REQ=0.10.35.1
+GSTPB_REQ=0.10.35.1
 
 dnl *** autotools stuff ****
 
@@ -834,30 +834,14 @@ AG_GST_CHECK_FEATURE(PULSE, [pulseaudio plug-in], pulseaudio, [
   dnl used in ext/pulse/pulseutil.c
   AC_CHECK_HEADERS([process.h])
 
-  AG_GST_PKG_CHECK_MODULES(PULSE, libpulse >= 0.9.10)
-  AG_GST_PKG_CHECK_MODULES(PULSE_0_9_11, libpulse >= 0.9.11)
-  if test x$HAVE_PULSE_0_9_11 = xyes; then
-    AC_DEFINE(HAVE_PULSE_0_9_11, 1, [defined if pulseaudio >= 0.9.11 is available])
-  fi
-  AG_GST_PKG_CHECK_MODULES(PULSE_0_9_12, libpulse >= 0.9.12)
-  if test x$HAVE_PULSE_0_9_12 = xyes; then
-    AC_DEFINE(HAVE_PULSE_0_9_12, 1, [defined if pulseaudio >= 0.9.12 is available])
-  fi
-  AG_GST_PKG_CHECK_MODULES(PULSE_0_9_13, libpulse >= 0.9.13)
-  if test x$HAVE_PULSE_0_9_13 = xyes; then
-    AC_DEFINE(HAVE_PULSE_0_9_13, 1, [defined if pulseaudio >= 0.9.13 is available])
-  fi
-  AG_GST_PKG_CHECK_MODULES(PULSE_0_9_15, libpulse >= 0.9.15)
-  if test x$HAVE_PULSE_0_9_15 = xyes; then
-    AC_DEFINE(HAVE_PULSE_0_9_15, 1, [defined if pulseaudio >= 0.9.15 is available])
-  fi
-  AG_GST_PKG_CHECK_MODULES(PULSE_0_9_16, libpulse >= 0.9.16)
-  if test x$HAVE_PULSE_0_9_16 = xyes; then
-    AC_DEFINE(HAVE_PULSE_0_9_16, 1, [defined if pulseaudio >= 0.9.16 is available])
-  fi
+  AG_GST_PKG_CHECK_MODULES(PULSE, libpulse >= 0.9.16)
   AG_GST_PKG_CHECK_MODULES(PULSE_0_9_20, libpulse >= 0.9.20)
   if test x$HAVE_PULSE_0_9_20 = xyes; then
     AC_DEFINE(HAVE_PULSE_0_9_20, 1, [defined if pulseaudio >= 0.9.20 is available])
+  fi
+  AG_GST_PKG_CHECK_MODULES(PULSE_1_0, libpulse >= 0.98)
+  if test x$HAVE_PULSE_1_0 = xyes; then
+    AC_DEFINE(HAVE_PULSE_1_0, 1, [defined if pulseaudio >= 1.0 is available])
   fi
 ])
 
@@ -916,12 +900,6 @@ dnl *** shout2 ***
 translit(dnm, m, l) AM_CONDITIONAL(USE_SHOUT2, true)
 AG_GST_CHECK_FEATURE(SHOUT2, [Shoutcast/Icecast client library], shout2, [
   AG_GST_PKG_CHECK_MODULES(SHOUT2, shout >= 2.0)
-  if test $HAVE_SHOUT2 = no
-  then
-    AM_PATH_SHOUT2(HAVE_SHOUT2="yes")
-    AC_SUBST(SHOUT2_CFLAGS)
-    AC_SUBST(SHOUT2_LIBS)
-  fi
 ])
 
 dnl *** soup ***
@@ -1015,9 +993,9 @@ AG_GST_CHECK_FEATURE(WAVPACK, [wavpack plug-in], wavpack, [
   AC_SUBST(WAVPACK_LIBS)
 ])
 
-dnl *** qtdemux & id3demux & matroska prefer to have zlib ***
+dnl *** qtdemux & matroska prefer to have zlib ***
 translit(dnm, m, l) AM_CONDITIONAL(USE_ZLIB, true)
-AG_GST_CHECK_FEATURE(ZLIB, [zlib support for id3demux/qtdemux/matroska],, [
+AG_GST_CHECK_FEATURE(ZLIB, [zlib support for qtdemux/matroska],, [
   AG_GST_CHECK_LIBHEADER(ZLIB,
     z, uncompress,, zlib.h, [
     HAVE_ZLIB="yes"
