@@ -128,6 +128,13 @@ enum
   LAST_SIGNAL
 };
 
+enum _GstRtspSrcRtcpSyncMode
+{
+  RTCP_SYNC_ALWAYS,
+  RTCP_SYNC_INITIAL,
+  RTCP_SYNC_RTP
+};
+
 enum _GstRtspSrcBufferMode
 {
   BUFFER_MODE_NONE,
@@ -173,6 +180,7 @@ gst_rtsp_src_buffer_mode_get_type (void)
 #define DEFAULT_USER_PW          NULL
 #define DEFAULT_BUFFER_MODE      BUFFER_MODE_AUTO
 #define DEFAULT_PORT_RANGE       NULL
+#define DEFAULT_SHORT_HEADER     FALSE
 
 enum
 {
@@ -194,6 +202,7 @@ enum
   PROP_BUFFER_MODE,
   PROP_PORT_RANGE,
   PROP_UDP_BUFFER_SIZE,
+  PROP_SHORT_HEADER,
   PROP_LAST
 };
 
@@ -472,6 +481,18 @@ gst_rtspsrc_class_init (GstRTSPSrcClass * klass)
           0, G_MAXINT, DEFAULT_UDP_BUFFER_SIZE,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * GstRTSPSrc::short-header:
+   *
+   * Only send the basic RTSP headers for broken encoders.
+   *
+   * Since: 0.10.31
+   */
+  g_object_class_install_property (gobject_class, PROP_SHORT_HEADER,
+      g_param_spec_boolean ("short-header", "Short Header",
+          "Only send the basic RTSP headers for broken encoders",
+          DEFAULT_SHORT_HEADER, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   gstelement_class->send_event = gst_rtspsrc_send_event;
   gstelement_class->change_state = gst_rtspsrc_change_state;
 
@@ -510,6 +531,7 @@ gst_rtspsrc_init (GstRTSPSrc * src, GstRTSPSrcClass * g_class)
   src->client_port_range.min = 0;
   src->client_port_range.max = 0;
   src->udp_buffer_size = DEFAULT_UDP_BUFFER_SIZE;
+  src->short_header = DEFAULT_SHORT_HEADER;
 
   /* get a list of all extensions */
   src->extensions = gst_rtsp_ext_list_get ();
@@ -703,6 +725,9 @@ gst_rtspsrc_set_property (GObject * object, guint prop_id, const GValue * value,
     case PROP_UDP_BUFFER_SIZE:
       rtspsrc->udp_buffer_size = g_value_get_int (value);
       break;
+    case PROP_SHORT_HEADER:
+      rtspsrc->short_header = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -794,6 +819,9 @@ gst_rtspsrc_get_property (GObject * object, guint prop_id, GValue * value,
     }
     case PROP_UDP_BUFFER_SIZE:
       g_value_set_int (value, rtspsrc->udp_buffer_size);
+      break;
+    case PROP_SHORT_HEADER:
+      g_value_set_boolean (value, rtspsrc->short_header);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1652,7 +1680,7 @@ cleanup:
 }
 
 static void
-gst_rtspsrc_flush (GstRTSPSrc * src, gboolean flush)
+gst_rtspsrc_flush (GstRTSPSrc * src, gboolean flush, gboolean playing)
 {
   GstEvent *event;
   gint cmd, i;
@@ -1668,9 +1696,12 @@ gst_rtspsrc_flush (GstRTSPSrc * src, gboolean flush)
     state = GST_STATE_PAUSED;
   } else {
     event = gst_event_new_flush_stop ();
-    GST_DEBUG_OBJECT (src, "stop flush");
+    GST_DEBUG_OBJECT (src, "stop flush; playing %d", playing);
     cmd = CMD_LOOP;
-    state = GST_STATE_PLAYING;
+    if (playing)
+      state = GST_STATE_PLAYING;
+    else
+      state = GST_STATE_PAUSED;
     clock = gst_element_get_clock (GST_ELEMENT_CAST (src));
     if (clock) {
       base_time = gst_clock_get_time (clock);
@@ -1819,7 +1850,7 @@ gst_rtspsrc_perform_seek (GstRTSPSrc * src, GstEvent * event)
    * blocking in preroll). */
   if (flush) {
     GST_DEBUG_OBJECT (src, "starting flush");
-    gst_rtspsrc_flush (src, TRUE);
+    gst_rtspsrc_flush (src, TRUE, FALSE);
   } else {
     if (src->task) {
       gst_task_pause (src->task);
@@ -1868,7 +1899,7 @@ gst_rtspsrc_perform_seek (GstRTSPSrc * src, GstEvent * event)
   if (flush) {
     /* if we started flush, we stop now */
     GST_DEBUG_OBJECT (src, "stopping flush");
-    gst_rtspsrc_flush (src, FALSE);
+    gst_rtspsrc_flush (src, FALSE, playing);
   } else if (src->running) {
     /* re-engage loop */
     gst_rtspsrc_loop_send_cmd (src, CMD_LOOP, FALSE);
@@ -4084,6 +4115,8 @@ gst_rtspsrc_loop_send_cmd (GstRTSPSrc * src, gint cmd, gboolean flush)
   /* start new request */
   gst_rtspsrc_loop_start_cmd (src, cmd);
 
+  GST_DEBUG_OBJECT (src, "sending cmd %d", cmd);
+
   GST_OBJECT_LOCK (src);
   old = src->loop_cmd;
   if (old != CMD_WAIT) {
@@ -4452,7 +4485,8 @@ gst_rtspsrc_try_send (GstRTSPSrc * src, GstRTSPConnection * conn,
   gint try = 0;
 
 again:
-  gst_rtsp_ext_list_before_send (src->extensions, request);
+  if (!src->short_header)
+    gst_rtsp_ext_list_before_send (src->extensions, request);
 
   GST_DEBUG_OBJECT (src, "sending message");
 
@@ -5931,6 +5965,47 @@ gst_rtspsrc_parse_rtpinfo (GstRTSPSrc * src, gchar * rtpinfo)
   return TRUE;
 }
 
+static void
+gst_rtspsrc_handle_rtcp_interval (GstRTSPSrc * src, gchar * rtcp)
+{
+  guint64 interval;
+  GList *walk;
+
+  interval = strtoul (rtcp, NULL, 10);
+  GST_DEBUG_OBJECT (src, "rtcp interval: %" G_GUINT64_FORMAT " ms", interval);
+
+  if (!interval)
+    return;
+
+  interval *= GST_MSECOND;
+
+  for (walk = src->streams; walk; walk = g_list_next (walk)) {
+    GstRTSPStream *stream = (GstRTSPStream *) walk->data;
+
+    /* already (optionally) retrieved this when configuring manager */
+    if (stream->session) {
+      GObject *rtpsession = stream->session;
+
+      GST_DEBUG_OBJECT (src, "configure rtcp interval in session %p",
+          rtpsession);
+      g_object_set (rtpsession, "rtcp-min-interval", interval, NULL);
+    }
+  }
+
+  /* now it happens that (Xenon) server sending this may also provide bogus
+   * RTCP SR sync data (i.e. with quite some jitter), so never mind those
+   * and just use RTP-Info to sync */
+  if (src->manager) {
+    GObjectClass *klass;
+
+    klass = G_OBJECT_GET_CLASS (G_OBJECT (src->manager));
+    if (g_object_class_find_property (klass, "rtcp-sync")) {
+      GST_DEBUG_OBJECT (src, "configuring rtp sync method");
+      g_object_set (src->manager, "rtcp-sync", RTCP_SYNC_RTP, NULL);
+    }
+  }
+}
+
 static gdouble
 gst_rtspsrc_get_float (const gchar * dstr)
 {
@@ -6138,6 +6213,12 @@ gst_rtspsrc_play (GstRTSPSrc * src, GstSegment * segment, gboolean async)
     while (gst_rtsp_message_get_header (&response, GST_RTSP_HDR_RTP_INFO,
             &hval, hval_idx++) == GST_RTSP_OK)
       gst_rtspsrc_parse_rtpinfo (src, hval);
+
+    /* some servers indicate RTCP parameters in PLAY response,
+     * rather than properly in SDP */
+    if (gst_rtsp_message_get_header (&response, GST_RTSP_HDR_RTCP_INTERVAL,
+            &hval, 0) == GST_RTSP_OK)
+      gst_rtspsrc_handle_rtcp_interval (src, hval);
 
     gst_rtsp_message_unset (&response);
 
@@ -6432,10 +6513,6 @@ gst_rtspsrc_thread (GstRTSPSrc * src)
 
   switch (cmd) {
     case CMD_OPEN:
-      src->cur_protocols = src->protocols;
-      /* first attempt, don't ignore timeouts */
-      src->ignore_timeout = FALSE;
-      src->open_error = FALSE;
       ret = gst_rtspsrc_open (src, TRUE);
       break;
     case CMD_PLAY:
@@ -6555,6 +6632,11 @@ gst_rtspsrc_change_state (GstElement * element, GstStateChange transition)
         goto start_failed;
       break;
     case GST_STATE_CHANGE_READY_TO_PAUSED:
+      /* init some state */
+      rtspsrc->cur_protocols = rtspsrc->protocols;
+      /* first attempt, don't ignore timeouts */
+      rtspsrc->ignore_timeout = FALSE;
+      rtspsrc->open_error = FALSE;
       gst_rtspsrc_loop_send_cmd (rtspsrc, CMD_OPEN, FALSE);
       break;
     case GST_STATE_CHANGE_PAUSED_TO_PLAYING:

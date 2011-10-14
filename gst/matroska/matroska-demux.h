@@ -71,6 +71,7 @@ typedef struct _GstMatroskaDemux {
   /* keeping track of playback position */
   gboolean                 segment_running;
   GstClockTime             last_stop_end;
+  GstClockTime             stream_start_time;
 
   GstEvent                *close_segment;
   GstEvent                *new_segment;
@@ -91,6 +92,9 @@ typedef struct _GstMatroskaDemux {
   /* reverse playback */
   GArray                  *seek_index;
   gint                     seek_entry;
+
+  /* gap handling */
+  guint64                  max_gap_time;
 } GstMatroskaDemux;
 
 typedef struct _GstMatroskaDemuxClass {

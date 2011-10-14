@@ -704,8 +704,8 @@ gst_v4l2_set_defaults (GstV4l2Object * v4l2object)
 
   if (v4l2object->tv_norm)
     norm = gst_v4l2_tuner_get_norm_by_std_id (v4l2object, v4l2object->tv_norm);
-  GST_DEBUG_OBJECT (v4l2object->element, "tv_norm=%d, norm=%p",
-      v4l2object->tv_norm, norm);
+  GST_DEBUG_OBJECT (v4l2object->element, "tv_norm=0x%" G_GINT64_MODIFIER "x, "
+      "norm=%p", (guint64) v4l2object->tv_norm, norm);
   if (norm) {
     gst_tuner_set_norm (tuner, norm);
   } else {
@@ -2175,11 +2175,20 @@ get_fmt_failed:
   }
 set_fmt_failed:
   {
-    GST_ELEMENT_ERROR (v4l2object->element, RESOURCE, SETTINGS,
-        (_("Device '%s' cannot capture at %dx%d"),
-            v4l2object->videodev, width, height),
-        ("Call to S_FMT failed for %" GST_FOURCC_FORMAT " @ %dx%d: %s",
-            GST_FOURCC_ARGS (pixelformat), width, height, g_strerror (errno)));
+    if (errno == EBUSY) {
+      GST_ELEMENT_ERROR (v4l2object->element, RESOURCE, BUSY,
+          (_("Device '%s' is busy"), v4l2object->videodev),
+          ("Call to S_FMT failed for %" GST_FOURCC_FORMAT " @ %dx%d: %s",
+              GST_FOURCC_ARGS (pixelformat), width, height,
+              g_strerror (errno)));
+    } else {
+      GST_ELEMENT_ERROR (v4l2object->element, RESOURCE, SETTINGS,
+          (_("Device '%s' cannot capture at %dx%d"),
+              v4l2object->videodev, width, height),
+          ("Call to S_FMT failed for %" GST_FOURCC_FORMAT " @ %dx%d: %s",
+              GST_FOURCC_ARGS (pixelformat), width, height,
+              g_strerror (errno)));
+    }
     return FALSE;
   }
 invalid_dimensions:

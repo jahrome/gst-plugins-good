@@ -317,7 +317,7 @@ struct _QtDemuxStream
   guint32 stts_samples;
   guint32 n_sample_times;
   guint32 stts_sample_index;
-  guint32 stts_time;
+  guint64 stts_time;
   guint32 stts_duration;
   /* stss */
   gboolean stss_present;
@@ -1281,7 +1281,10 @@ gst_qtdemux_perform_seek (GstQTDemux * qtdemux, GstSegment * segment)
   GST_DEBUG_OBJECT (qtdemux, "seeking to %" GST_TIME_FORMAT,
       GST_TIME_ARGS (desired_offset));
 
-  if (segment->flags & GST_SEEK_FLAG_KEY_UNIT) {
+  /* may not have enough fragmented info to do this adjustment,
+   * and we can't scan (and probably should not) at this time with
+   * possibly flushing upstream */
+  if ((segment->flags & GST_SEEK_FLAG_KEY_UNIT) && !qtdemux->fragmented) {
     gint64 min_offset;
 
     gst_qtdemux_adjust_seek (qtdemux, desired_offset, &min_offset, NULL);
@@ -1862,6 +1865,8 @@ gst_qtdemux_change_state (GstElement * element, GstStateChange transition)
       gst_segment_init (&qtdemux->segment, GST_FORMAT_TIME);
       qtdemux->requested_seek_time = GST_CLOCK_TIME_NONE;
       qtdemux->seek_offset = 0;
+      qtdemux->upstream_seekable = FALSE;
+      qtdemux->upstream_size = 0;
       break;
     }
     default:
@@ -2102,6 +2107,14 @@ qtdemux_parse_trun (GstQTDemux * qtdemux, GstByteReader * trun,
       "default dur %d, size %d, flags 0x%x, base offset %" G_GINT64_FORMAT,
       stream->track_id, d_sample_duration, d_sample_size, d_sample_flags,
       *base_offset);
+
+  /* presence of stss or not can't really tell us much,
+   * and flags and so on tend to be marginally reliable in these files */
+  if (stream->subtype == FOURCC_soun) {
+    GST_DEBUG_OBJECT (qtdemux,
+        "sound track in fragmented file; marking all keyframes");
+    stream->all_keyframe = TRUE;
+  }
 
   if (!gst_byte_reader_skip (trun, 1) ||
       !gst_byte_reader_get_uint24_be (trun, &flags))
@@ -3973,6 +3986,49 @@ qtdemux_seek_offset (GstQTDemux * demux, guint64 offset)
   return res;
 }
 
+/* check for seekable upstream, above and beyond a mere query */
+static void
+gst_qtdemux_check_seekability (GstQTDemux * demux)
+{
+  GstQuery *query;
+  gboolean seekable = FALSE;
+  gint64 start = -1, stop = -1;
+
+  if (demux->upstream_size)
+    return;
+
+  query = gst_query_new_seeking (GST_FORMAT_BYTES);
+  if (!gst_pad_peer_query (demux->sinkpad, query)) {
+    GST_DEBUG_OBJECT (demux, "seeking query failed");
+    goto done;
+  }
+
+  gst_query_parse_seeking (query, NULL, &seekable, &start, &stop);
+
+  /* try harder to query upstream size if we didn't get it the first time */
+  if (seekable && stop == -1) {
+    GstFormat fmt = GST_FORMAT_BYTES;
+
+    GST_DEBUG_OBJECT (demux, "doing duration query to fix up unset stop");
+    gst_pad_query_peer_duration (demux->sinkpad, &fmt, &stop);
+  }
+
+  /* if upstream doesn't know the size, it's likely that it's not seekable in
+   * practice even if it technically may be seekable */
+  if (seekable && (start != 0 || stop <= start)) {
+    GST_DEBUG_OBJECT (demux, "seekable but unknown start/stop -> disable");
+    seekable = FALSE;
+  }
+
+done:
+  gst_query_unref (query);
+
+  GST_DEBUG_OBJECT (demux, "seekable: %d (%" G_GUINT64_FORMAT " - %"
+      G_GUINT64_FORMAT ")", seekable, start, stop);
+  demux->upstream_seekable = seekable;
+  demux->upstream_size = seekable ? stop : -1;
+}
+
 /* FIXME, unverified after edit list updates */
 static GstFlowReturn
 gst_qtdemux_chain (GstPad * sinkpad, GstBuffer * inbuf)
@@ -4003,6 +4059,8 @@ gst_qtdemux_chain (GstPad * sinkpad, GstBuffer * inbuf)
         const guint8 *data;
         guint32 fourcc;
         guint64 size;
+
+        gst_qtdemux_check_seekability (demux);
 
         data = gst_adapter_peek (demux->adapter, demux->neededbytes);
 
@@ -4040,7 +4098,15 @@ gst_qtdemux_chain (GstPad * sinkpad, GstBuffer * inbuf)
             target = old + size;
 
             /* try to jump over the atom with a seek */
-            res = qtdemux_seek_offset (demux, target);
+            /* only bother if it seems worth doing so,
+             * and avoids possible upstream/server problems */
+            if (demux->upstream_seekable &&
+                demux->upstream_size > 4 * (1 << 20)) {
+              res = qtdemux_seek_offset (demux, target);
+            } else {
+              GST_DEBUG_OBJECT (demux, "skipping seek");
+              res = FALSE;
+            }
 
             if (res) {
               GST_DEBUG_OBJECT (demux, "seek success");
@@ -4058,7 +4124,7 @@ gst_qtdemux_chain (GstPad * sinkpad, GstBuffer * inbuf)
             } else {
               /* seek failed, need to buffer */
               demux->offset = old;
-              GST_DEBUG_OBJECT (demux, "seek failed");
+              GST_DEBUG_OBJECT (demux, "seek failed/skipped");
               /* there may be multiple mdat (or alike) buffers */
               /* sanity check */
               if (demux->mdatbuffer)
@@ -4153,6 +4219,7 @@ gst_qtdemux_chain (GstPad * sinkpad, GstBuffer * inbuf)
            * put preceding buffered data ahead of current moov data.
            * This should also handle evil mdat, moov, mdat cases and alike */
           gst_adapter_clear (demux->adapter);
+          gst_adapter_push (demux->adapter, demux->mdatbuffer);
           demux->mdatbuffer = NULL;
           demux->offset = demux->mdatoffset;
           demux->neededbytes = next_entry_size (demux);
@@ -5148,7 +5215,7 @@ qtdemux_add_fragmented_samples (GstQTDemux * qtdemux)
   guint64 length, offset;
   GstBuffer *buf = NULL;
   GstFlowReturn ret = GST_FLOW_OK;
-  GstFlowReturn res = TRUE;
+  GstFlowReturn res = GST_FLOW_OK;
 
   offset = qtdemux->moof_offset;
   GST_DEBUG_OBJECT (qtdemux, "next moof at offset %" G_GUINT64_FORMAT, offset);
@@ -5623,8 +5690,8 @@ done2:
 
     for (i = stream->stts_index; i < n_sample_times; i++) {
       guint32 stts_samples;
-      guint32 stts_duration;
-      guint32 stts_time;
+      gint32 stts_duration;
+      gint64 stts_time;
 
       if (stream->stts_sample_index >= stream->stts_samples
           || !stream->stts_sample_index) {
@@ -5654,7 +5721,9 @@ done2:
         cur->timestamp = stts_time;
         cur->duration = stts_duration;
 
-        stts_time += stts_duration;
+        /* avoid 32-bit wrap-around,
+         * but still mind possible 'negative' duration */
+        stts_time += (gint64) stts_duration;
         cur++;
 
         if (G_UNLIKELY (cur > last)) {
@@ -8292,6 +8361,42 @@ unknown_tag:
   }
 }
 
+static void
+qtdemux_tag_add_id32 (GstQTDemux * demux, const char *tag,
+    const char *tag_bis, GNode * node)
+{
+  guint8 *data;
+  GstBuffer *buf;
+  guint len;
+  GstTagList *taglist = NULL;
+
+  GST_LOG_OBJECT (demux, "parsing ID32");
+
+  data = node->data;
+  len = GST_READ_UINT32_BE (data);
+
+  /* need at least full box and language tag */
+  if (len < 12 + 2)
+    return;
+
+  buf = gst_buffer_new ();
+  GST_BUFFER_DATA (buf) = data + 14;
+  GST_BUFFER_SIZE (buf) = len - 14;
+
+  taglist = gst_tag_list_from_id3v2_tag (buf);
+  if (taglist) {
+    GST_LOG_OBJECT (demux, "parsing ok");
+    gst_tag_list_insert (demux->tag_list, taglist, GST_TAG_MERGE_KEEP);
+  } else {
+    GST_LOG_OBJECT (demux, "parsing failed");
+  }
+
+  if (taglist)
+    gst_tag_list_free (taglist);
+
+  gst_buffer_unref (buf);
+}
+
 typedef void (*GstQTDemuxAddTagFunc) (GstQTDemux * demux,
     const char *tag, const char *tag_bis, GNode * node);
 
@@ -8361,7 +8466,9 @@ static const struct
      * http://atomicparsley.sourceforge.net/mpeg-4files.html and
      * bug #614471
      */
-  FOURCC_____, "", NULL, qtdemux_tag_add_revdns}
+  FOURCC_____, "", NULL, qtdemux_tag_add_revdns}, {
+    /* see http://www.mp4ra.org/specs.html for ID32 in meta box */
+  FOURCC_ID32, "", NULL, qtdemux_tag_add_id32}
 };
 
 static void
@@ -8775,6 +8882,15 @@ qtdemux_parse_tree (GstQTDemux * qtdemux)
     qtdemux_parse_udta (qtdemux, udta);
   } else {
     GST_LOG_OBJECT (qtdemux, "No udta node found.");
+  }
+
+  /* maybe also some tags in meta box */
+  udta = qtdemux_tree_get_child_by_type (qtdemux->moov_node, FOURCC_meta);
+  if (udta) {
+    GST_DEBUG_OBJECT (qtdemux, "Parsing meta box for tags.");
+    qtdemux_parse_udta (qtdemux, udta);
+  } else {
+    GST_LOG_OBJECT (qtdemux, "No meta node found.");
   }
 
   qtdemux->tag_list = qtdemux_add_container_format (qtdemux, qtdemux->tag_list);

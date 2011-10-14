@@ -391,6 +391,8 @@ gst_matroska_mux_finalize (GObject * object)
 {
   GstMatroskaMux *mux = GST_MATROSKA_MUX (object);
 
+  gst_event_replace (&mux->force_key_unit_event, NULL);
+
   gst_object_unref (mux->collect);
   gst_object_unref (mux->ebml_write);
   if (mux->writing_app)
@@ -656,12 +658,29 @@ gst_matroska_mux_handle_sink_event (GstPad * pad, GstEvent * event)
       event = NULL;
       break;
     }
-    case GST_EVENT_NEWSEGMENT:
-      /* We don't support NEWSEGMENT events */
-      ret = FALSE;
-      gst_event_unref (event);
-      event = NULL;
+    case GST_EVENT_NEWSEGMENT:{
+      GstFormat format;
+
+      gst_event_parse_new_segment (event, NULL, NULL, &format, NULL, NULL,
+          NULL);
+      if (format != GST_FORMAT_TIME) {
+        ret = FALSE;
+        gst_event_unref (event);
+        event = NULL;
+      }
       break;
+    }
+    case GST_EVENT_CUSTOM_DOWNSTREAM:{
+      const GstStructure *structure;
+
+      structure = gst_event_get_structure (event);
+      if (gst_structure_has_name (structure, "GstForceKeyUnit")) {
+        gst_event_replace (&mux->force_key_unit_event, NULL);
+        mux->force_key_unit_event = event;
+        event = NULL;
+      }
+      break;
+    }
     default:
       break;
   }
@@ -2204,6 +2223,10 @@ gst_matroska_mux_start (GstMatroskaMux * mux)
       child = gst_ebml_write_master_start (ebml, GST_MATROSKA_ID_TRACKENTRY);
       gst_matroska_mux_track_header (mux, collect_pad->track);
       gst_ebml_write_master_finish (ebml, child);
+      /* some remaing pad/track setup */
+      collect_pad->default_duration_scaled =
+          gst_util_uint64_scale (collect_pad->track->default_duration,
+          1, mux->time_scale);
     }
   }
   gst_ebml_write_master_finish (ebml, master);
@@ -2474,6 +2497,10 @@ gst_matroska_mux_best_pad (GstMatroskaMux * mux, gboolean * popped)
             collect_pad->buffer = NULL;
             return NULL;
           } else {
+            GST_LOG_OBJECT (mux, "buffer ts %" GST_TIME_FORMAT " -> %"
+                GST_TIME_FORMAT " running time",
+                GST_TIME_ARGS (GST_BUFFER_TIMESTAMP (collect_pad->buffer)),
+                GST_TIME_ARGS (time));
             collect_pad->buffer =
                 gst_buffer_make_metadata_writable (collect_pad->buffer);
             GST_BUFFER_TIMESTAMP (collect_pad->buffer) = time;
@@ -2688,13 +2715,20 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaPad * collect_pad)
   }
 
   if (mux->cluster) {
-    /* start a new cluster at every keyframe or when we may be reaching the
-     * limit of the relative timestamp */
+    /* start a new cluster at every keyframe, at every GstForceKeyUnit event,
+     * or when we may be reaching the limit of the relative timestamp */
     if (mux->cluster_time +
         mux->max_cluster_duration < GST_BUFFER_TIMESTAMP (buf)
-        || is_video_keyframe) {
+        || is_video_keyframe || mux->force_key_unit_event) {
       if (!mux->streamable)
         gst_ebml_write_master_finish (ebml, mux->cluster);
+
+      /* Forward the GstForceKeyUnit event after finishing the cluster */
+      if (mux->force_key_unit_event) {
+        gst_pad_push_event (mux->srcpad, mux->force_key_unit_event);
+        mux->force_key_unit_event = NULL;
+      }
+
       mux->prev_cluster_size = ebml->pos - mux->cluster_pos;
       mux->cluster_pos = ebml->pos;
       gst_ebml_write_set_cache (ebml, 0x20);
@@ -2767,9 +2801,14 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaPad * collect_pad)
 
   /* Check if the duration differs from the default duration. */
   write_duration = FALSE;
-  block_duration = GST_BUFFER_DURATION (buf);
+  block_duration = 0;
   if (GST_BUFFER_DURATION_IS_VALID (buf)) {
-    if (block_duration != collect_pad->track->default_duration) {
+    block_duration = gst_util_uint64_scale (GST_BUFFER_DURATION (buf),
+        1, mux->time_scale);
+
+    /* small difference should be ok. */
+    if (block_duration > collect_pad->default_duration_scaled + 1 ||
+        block_duration < collect_pad->default_duration_scaled - 1) {
       write_duration = TRUE;
     }
   }
@@ -2810,10 +2849,8 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaPad * collect_pad)
     hdr =
         gst_matroska_mux_create_buffer_header (collect_pad->track,
         relative_timestamp, 0);
-    if (write_duration) {
-      gst_ebml_write_uint (ebml, GST_MATROSKA_ID_BLOCKDURATION,
-          gst_util_uint64_scale (block_duration, 1, mux->time_scale));
-    }
+    if (write_duration)
+      gst_ebml_write_uint (ebml, GST_MATROSKA_ID_BLOCKDURATION, block_duration);
     gst_ebml_write_buffer_header (ebml, GST_MATROSKA_ID_BLOCK,
         GST_BUFFER_SIZE (buf) + GST_BUFFER_SIZE (hdr));
     gst_ebml_write_buffer (ebml, hdr);

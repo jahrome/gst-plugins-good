@@ -367,6 +367,8 @@ gst_qt_mux_pad_reset (GstQTPad * qtpad)
   qtpad->avg_bitrate = 0;
   qtpad->max_bitrate = 0;
   qtpad->ts_n_entries = 0;
+  qtpad->total_duration = 0;
+  qtpad->total_bytes = 0;
 
   qtpad->buf_head = 0;
   qtpad->buf_tail = 0;
@@ -1738,15 +1740,25 @@ gst_qt_mux_stop_file (GstQTMux * qtmux)
     GstCollectData *cdata = (GstCollectData *) walk->data;
     GstQTPad *qtpad = (GstQTPad *) cdata;
 
-    /* send last buffer */
+    /* avoid add_buffer complaining if not negotiated
+     * in which case no buffers either, so skipping */
+    if (!qtpad->fourcc) {
+      GST_DEBUG_OBJECT (qtmux, "Pad %s has never had buffers",
+          GST_PAD_NAME (qtpad->collect.pad));
+      continue;
+    }
+
+    /* send last buffer; also flushes possibly queued buffers/ts */
     GST_DEBUG_OBJECT (qtmux, "Sending the last buffer for pad %s",
         GST_PAD_NAME (qtpad->collect.pad));
     ret = gst_qt_mux_add_buffer (qtmux, qtpad, NULL);
-    if (ret != GST_FLOW_OK)
+    if (ret != GST_FLOW_OK) {
       GST_WARNING_OBJECT (qtmux, "Failed to send last buffer for %s, "
           "flow return: %s", GST_PAD_NAME (qtpad->collect.pad),
           gst_flow_get_name (ret));
+    }
 
+    /* having flushed above, can check for buffers now */
     if (!GST_CLOCK_TIME_IS_VALID (qtpad->first_ts)) {
       GST_DEBUG_OBJECT (qtmux, "Pad %s has no buffers",
           GST_PAD_NAME (qtpad->collect.pad));
@@ -1758,6 +1770,20 @@ gst_qt_mux_stop_file (GstQTMux * qtmux)
         (GST_CLOCK_TIME_IS_VALID (qtpad->first_ts) &&
             qtpad->last_dts > first_ts)) {
       first_ts = qtpad->last_dts;
+    }
+
+    /* update average bitrate of streams if needed */
+    {
+      guint32 avgbitrate = 0;
+      guint32 maxbitrate = qtpad->max_bitrate;
+
+      if (qtpad->avg_bitrate)
+        avgbitrate = qtpad->avg_bitrate;
+      else if (qtpad->total_duration > 0)
+        avgbitrate = (guint32) gst_util_uint64_scale_round (qtpad->total_bytes,
+            8 * GST_SECOND, qtpad->total_duration);
+
+      atom_trak_update_bitrates (qtpad->trak, avgbitrate, maxbitrate);
     }
   }
 
@@ -2029,6 +2055,39 @@ gst_qt_mux_push_ts (GstQTMux * qtmux, GstQTPad * pad, GstClockTime ts)
   pad->ts_n_entries++;
 }
 
+static void
+check_and_subtract_ts (GstQTMux * qtmux, GstClockTime * ts_a, GstClockTime ts_b)
+{
+  if (G_LIKELY (GST_CLOCK_TIME_IS_VALID (*ts_a))) {
+    if (G_LIKELY (*ts_a > ts_b)) {
+      *ts_a -= ts_b;
+    } else {
+      *ts_a = 0;
+      GST_WARNING_OBJECT (qtmux, "Subtraction would result in negative value, "
+          "using 0 as result");
+    }
+  }
+}
+
+/* subtract ts from all buffers enqueued on the pad */
+static void
+gst_qt_mux_subtract_ts (GstQTMux * qtmux, GstQTPad * pad, GstClockTime ts)
+{
+  gint i;
+
+  for (i = 0; (i < QTMUX_NO_OF_TS) && (i < pad->ts_n_entries); i++) {
+    check_and_subtract_ts (qtmux, &pad->ts_entries[i], ts);
+  }
+  for (i = 0; i < G_N_ELEMENTS (pad->buf_entries); i++) {
+    if (pad->buf_entries[i]) {
+      check_and_subtract_ts (qtmux, &GST_BUFFER_TIMESTAMP (pad->buf_entries[i]),
+          ts);
+      check_and_subtract_ts (qtmux,
+          &GST_BUFFER_OFFSET_END (pad->buf_entries[i]), ts);
+    }
+  }
+}
+
 /* takes ownership of @buf */
 static GstBuffer *
 gst_qt_mux_get_asc_buffer_ts (GstQTMux * qtmux, GstQTPad * pad, GstBuffer * buf)
@@ -2085,9 +2144,17 @@ gst_qt_mux_add_buffer (GstQTMux * qtmux, GstQTPad * pad, GstBuffer * buf)
     buf = pad->prepare_buf_func (pad, buf, qtmux);
   }
 
+  if (G_LIKELY (buf != NULL && GST_CLOCK_TIME_IS_VALID (pad->first_ts) &&
+          pad->first_ts != 0)) {
+    buf = gst_buffer_make_metadata_writable (buf);
+    check_and_subtract_ts (qtmux, &GST_BUFFER_TIMESTAMP (buf), pad->first_ts);
+  }
+  /* when we obtain the first_ts we subtract from all stored buffers we have,
+   * after that we can subtract on input */
+
 again:
   last_buf = pad->last_buf;
-  if (G_UNLIKELY (qtmux->dts_method == DTS_METHOD_REORDER)) {
+  if (qtmux->dts_method == DTS_METHOD_REORDER) {
     buf = gst_qt_mux_get_asc_buffer_ts (qtmux, pad, buf);
     if (!buf && !last_buf) {
       GST_DEBUG_OBJECT (qtmux, "no reordered buffer");
@@ -2158,6 +2225,31 @@ again:
     goto no_order;
   }
 
+  /* if this is the first buffer, store the timestamp */
+  if (G_UNLIKELY (pad->first_ts == GST_CLOCK_TIME_NONE) && last_buf) {
+    if (GST_CLOCK_TIME_IS_VALID (GST_BUFFER_TIMESTAMP (last_buf))) {
+      pad->first_ts = GST_BUFFER_TIMESTAMP (last_buf);
+    } else {
+      GST_DEBUG_OBJECT (qtmux, "First buffer for pad %s has no timestamp, "
+          "using 0 as first timestamp", GST_PAD_NAME (pad->collect.pad));
+      pad->first_ts = 0;
+    }
+    GST_DEBUG_OBJECT (qtmux, "Stored first timestamp for pad %s %"
+        GST_TIME_FORMAT, GST_PAD_NAME (pad->collect.pad),
+        GST_TIME_ARGS (pad->first_ts));
+
+    gst_qt_mux_subtract_ts (qtmux, pad, pad->first_ts);
+
+    GST_BUFFER_TIMESTAMP (last_buf) = 0;
+    check_and_subtract_ts (qtmux, &GST_BUFFER_OFFSET_END (last_buf),
+        pad->first_ts);
+    if (buf) {
+      check_and_subtract_ts (qtmux, &GST_BUFFER_TIMESTAMP (buf), pad->first_ts);
+      check_and_subtract_ts (qtmux, &GST_BUFFER_OFFSET_END (buf),
+          pad->first_ts);
+    }
+  }
+
   /* fall back to duration if last buffer or
    * out-of-order (determined previously), otherwise use input ts */
   if (buf == NULL ||
@@ -2213,6 +2305,12 @@ again:
     ts = gst_util_uint64_scale (10, GST_SECOND,
         atom_trak_get_timescale (pad->trak));
     duration = MAX (duration, ts);
+  }
+
+  /* for computing the avg bitrate */
+  if (G_LIKELY (last_buf)) {
+    pad->total_bytes += GST_BUFFER_SIZE (last_buf);
+    pad->total_duration += duration;
   }
 
   gst_buffer_replace (&pad->last_buf, buf);
@@ -2315,20 +2413,6 @@ again:
     GST_DEBUG_OBJECT (qtmux, "New longest chunk found: %" GST_TIME_FORMAT
         ", pad %s", GST_TIME_ARGS (duration), GST_PAD_NAME (pad->collect.pad));
     qtmux->longest_chunk = duration;
-  }
-
-  /* if this is the first buffer, store the timestamp */
-  if (G_UNLIKELY (pad->first_ts == GST_CLOCK_TIME_NONE) && last_buf) {
-    if (GST_CLOCK_TIME_IS_VALID (GST_BUFFER_TIMESTAMP (last_buf))) {
-      pad->first_ts = GST_BUFFER_TIMESTAMP (last_buf);
-    } else {
-      GST_DEBUG_OBJECT (qtmux, "First buffer for pad %s has no timestamp, "
-          "using 0 as first timestamp", GST_PAD_NAME (pad->collect.pad));
-      pad->first_ts = 0;
-    }
-    GST_DEBUG_OBJECT (qtmux, "Stored first timestamp for pad %s %"
-        GST_TIME_FORMAT, GST_PAD_NAME (pad->collect.pad),
-        GST_TIME_ARGS (pad->first_ts));
   }
 
   /* now we go and register this buffer/sample all over */
